@@ -263,4 +263,4 @@ async def refresh(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "ok!"}
