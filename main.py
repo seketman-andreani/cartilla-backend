@@ -70,15 +70,13 @@ def register_oidc_clients():
       - {OS}_TENANT_ID
       - {OS}_CLIENT_ID
       - {OS}_CLIENT_SECRET
-      - {OS}_REDIRECT_URI  (opcional, se usará la ruta /auth/callback/{os_key})
+      - {OS}_REDIRECT_URI
     """
     for key in OS_KEYS:
         prefix = key.upper()
         tenant = os.getenv(f"{prefix}_TENANT_ID")
         client_id = os.getenv(f"{prefix}_CLIENT_ID")
         client_secret = os.getenv(f"{prefix}_CLIENT_SECRET")
-        redirect = os.getenv(f"{prefix}_REDIRECT_URI",
-                              f"https://{os.getenv('RENDER_EXTERNAL_URL','localhost')}:/auth/callback/{key}")
         if not (tenant and client_id and client_secret):
             # no raise: permite deploy aunque falten vars (pero login fallará)
             continue
@@ -159,17 +157,13 @@ async def login(request: Request, os_key: str):
     if client is None:
         logger.error(f"No se pudo crear el cliente OAuth para {os_key}")
         raise HTTPException(status_code=500, detail=f"oidc_client_not_configured_for_{os_key}")
-    
     logger.info(f"Cliente OAuth creado exitosamente para {os_key}")
     
-    redirect_uri = os.getenv(f"{os_key.upper()}_REDIRECT_URI",
-                             f"{request.url.scheme}://{request.url.hostname}/auth/callback/{os_key}")
-    
-    if redirect_uri:
-        logger.info(f"Redirect URI recuperado exitosamente: {redirect_uri}")
-    else:
-        logger.warning(f"No se pudo recuperar el Redirect URI para {os_key}, usando valor por defecto")
-    
+    redirect_uri = os.getenv(f"{os_key.upper()}_REDIRECT_URI")
+    if not redirect_uri:
+        raise HTTPException(status_code=500, detail=f"{os_key.upper()}_REDIRECT_URI not set")
+
+    logger.info(f"[{os_key}] Using redirect_uri: {redirect_uri}")
     return await client.authorize_redirect(request, redirect_uri)
 
 @app.get("/auth/callback/{os_key}")
