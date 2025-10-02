@@ -297,4 +297,20 @@ async def refresh(request: Request):
 
 @app.get("/")
 async def root():
-    return {"status": "ok!"}
+    return {"status": "ok"}
+
+@app.get("/healthcheck")
+async def healthcheck():
+    try:
+        # Verificar conexión a la base de datos
+        with engine.connect() as connection:
+            connection.execute("SELECT 1")
+        db_status = "ok"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+    
+    return {
+        "status": "ok",
+        "db_status": db_status,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
