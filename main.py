@@ -12,8 +12,13 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from starlette.middleware.sessions import SessionMiddleware
 
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()  # carga .env en local (Render usa env vars del panel)
+
+# Configurar el logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------- Config ----------
 PORT = int(os.getenv("PORT", "10000"))
@@ -142,49 +147,84 @@ def db_upsert_refresh(sub: str, os_key: str, refresh_token: str, expires_at: Opt
 # ---------- Routes ----------
 @app.get("/login/{os_key}")
 async def login(request: Request, os_key: str):
+    logger.info(f"Inicio del método /login/{os_key}")
+    
     if os_key not in OS_KEYS:
+        logger.error(f"OS key desconocido: {os_key}")
         raise HTTPException(status_code=404, detail="unknown_os")
+    
     client_name = f"azure_{os_key}"
     client = oauth.create_client(client_name)
+    
     if client is None:
+        logger.error(f"No se pudo crear el cliente OAuth para {os_key}")
         raise HTTPException(status_code=500, detail=f"oidc_client_not_configured_for_{os_key}")
+    
+    logger.info(f"Cliente OAuth creado exitosamente para {os_key}")
+    
     redirect_uri = os.getenv(f"{os_key.upper()}_REDIRECT_URI",
                              f"{request.url.scheme}://{request.url.hostname}/auth/callback/{os_key}")
+    
+    if redirect_uri:
+        logger.info(f"Redirect URI recuperado exitosamente: {redirect_uri}")
+    else:
+        logger.warning(f"No se pudo recuperar el Redirect URI para {os_key}, usando valor por defecto")
+    
     return await client.authorize_redirect(request, redirect_uri)
 
 @app.get("/auth/callback/{os_key}")
 async def auth_callback(request: Request, os_key: str):
+    logger.info(f"Inicio del método /auth/callback/{os_key}")
+    
     if os_key not in OS_KEYS:
+        logger.error(f"OS key desconocido: {os_key}")
         raise HTTPException(status_code=404, detail="unknown_os")
+    
     client_name = f"azure_{os_key}"
     client = oauth.create_client(client_name)
     if client is None:
+        logger.error(f"No se pudo crear el cliente OAuth para {os_key}")
         raise HTTPException(status_code=500, detail=f"oidc_client_not_configured_for_{os_key}")
+    
     try:
         token = await client.authorize_access_token(request)
+        logger.info(f"Token recibido exitosamente para {os_key}: {token}")
     except OAuthError as err:
+        logger.error(f"Error de OAuth al autorizar el token para {os_key}: {err.error}")
         raise HTTPException(status_code=400, detail=f"oauth_error: {err.error}")
+    
     # token is a dict with access_token, id_token, refresh_token (if offline_access), expires_in...
     # parse id_token to get user info
     try:
         userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
-    except Exception:
+        logger.info(f"Información del usuario obtenida exitosamente: {userinfo}")
+    except Exception as e:
+        logger.warning(f"No se pudo obtener información del usuario: {str(e)}")
         userinfo = {}
+    
     sub = userinfo.get("sub") or userinfo.get("oid") or userinfo.get("preferred_username")
     email = userinfo.get("email") or userinfo.get("preferred_username")
     name = userinfo.get("name")
-
+    
+    if not sub:
+        logger.error("No se pudo determinar el identificador único del usuario (sub)")
+        raise HTTPException(status_code=400, detail="invalid_user_info")
+    
     # Guardar refresh_token en DB (si viene)
     refresh_token = token.get("refresh_token")
     expires_at = None
     if token.get("expires_in"):
         expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(token["expires_in"]))
     if refresh_token and sub:
+        logger.info(f"Guardando refresh_token para el usuario {sub} y OS {os_key}")
         db_upsert_refresh(sub=sub, os_key=os_key, refresh_token=refresh_token, expires_at=expires_at)
-
+    else:
+        logger.warning(f"No se recibió refresh_token para el usuario {sub} y OS {os_key}")
+    
     # Generar JWT CartillaIA y redirigir al frontend con token en query string (POC)
     cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key)
     redirect_to = f"{os.getenv('FRONTEND_BASE', FRONTEND_BASE)}/dashboard?token={cart_jwt}"
+    logger.info(f"Redirigiendo al usuario {sub} al frontend con el JWT generado")
     return RedirectResponse(url=redirect_to)
 
 @app.get("/me")
