@@ -9,6 +9,7 @@ from authlib.integrations.starlette_client import OAuth, OAuthError
 import jwt  # PyJWT
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, select
 from sqlalchemy.orm import sessionmaker, declarative_base
+from starlette.middleware.sessions import SessionMiddleware
 
 from dotenv import load_dotenv
 
@@ -50,6 +51,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Clave secreta para firmar cookies de sesión
+app.add_middleware(
+    SessionMiddleware, 
+    secret_key=os.getenv("CARTILLAIA_SECRET", "session-secret-for-dev")
 )
 
 def register_oidc_clients():
