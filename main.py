@@ -138,14 +138,15 @@ async def login(request: Request, os_key: str):
     state = secrets.token_urlsafe(32)
     STATE_STORE[state] = {"os_key": os_key}
 
-    # Forzamos carga de metadata si no está
     if not client.server_metadata:
         await client.load_server_metadata()
 
-    uri = await client.create_authorization_url(
+    auth_data = await client.create_authorization_url(
         redirect_uri=redirect_uri,
         state=state,
     )
+
+    uri = auth_data["url"]
 
     logger.info(f"[{os_key}] Login iniciado con state={state}, redirect_uri={redirect_uri}")
     return RedirectResponse(uri)
