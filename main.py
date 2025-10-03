@@ -23,7 +23,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- Config ----------
-PORT = int(os.getenv("PORT", "10000"))
 FRONTEND_BASE = os.getenv("FRONTEND_BASE", "http://localhost:3000")
 CARTILLAIA_SECRET = os.getenv("CARTILLAIA_SECRET", "cartillaia-secret-for-dev")
 JWT_EXP_MINUTES = int(os.getenv("JWT_EXP_MINUTES", "15"))
@@ -191,6 +190,8 @@ async def auth_callback(request: Request, os_key: str):
 
     # POC: decodificamos sin verificar firma
     userinfo = jwt.decode(id_token, options={"verify_signature": False})
+    for key, value in userinfo.items():
+        logger.info(f" - UserInfo field: {key} = {value}")
 
     sub = userinfo.get("sub") or userinfo.get("oid")
     email = userinfo.get("email") or userinfo.get("preferred_username")
@@ -212,15 +213,6 @@ async def auth_callback(request: Request, os_key: str):
 
     logger.info(f"[{os_key}] Usuario autenticado: {email}, redirigiendo al frontend.")
     return RedirectResponse(redirect_to)
-
-@app.get("/me")
-async def me(request: Request):
-    auth = request.headers.get("Authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing_token")
-    token = auth.split(" ", 1)[1]
-    payload = decode_cartillaia_jwt(token)
-    return JSONResponse(content=payload)
 
 @app.post("/refresh")
 async def refresh(request: Request):
