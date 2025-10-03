@@ -170,18 +170,18 @@ async def auth_callback(request: Request, os_key: str):
     if client is None:
         raise HTTPException(status_code=500, detail=f"OIDC client not configured for {os_key}")
 
-    # obtener state de la query
+    # obtener y validar state
     state = request.query_params.get("state")
     if not state or state not in STATE_STORE:
         raise HTTPException(status_code=400, detail="invalid_or_missing_state")
 
     try:
-        token = await client.authorize_access_token(request)
+        token = await client.authorize_access_token(request, state=state)
     except OAuthError as err:
         logger.error(f"OAuth error for {os_key}: {err.error}")
         raise HTTPException(status_code=400, detail=f"oauth_error: {err.error}")
 
-    # limpiamos el state
+    # limpiar state
     del STATE_STORE[state]
 
     # procesar userinfo
@@ -197,7 +197,6 @@ async def auth_callback(request: Request, os_key: str):
     if not sub:
         raise HTTPException(status_code=400, detail="invalid_user_info")
 
-    # generar tu JWT propio para CartillaIA
     cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key)
     redirect_to = f"{os.getenv('FRONTEND_BASE')}/dashboard?token={cart_jwt}"
 
