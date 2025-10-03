@@ -164,17 +164,16 @@ async def auth_callback(request: Request, os_key: str):
     if not code:
         raise HTTPException(status_code=400, detail="missing_code")
 
-    # limpiar el state usado
     del STATE_STORE[state]
 
     try:
-        # 👇 usamos el cliente subyacente, no el wrapper Starlette
         oauth_client = client._get_oauth_client()
         token = await oauth_client.fetch_token(
-            client.server_metadata["token_endpoint"],
+            url=client.server_metadata["token_endpoint"],
             grant_type="authorization_code",
             code=code,
             redirect_uri=os.getenv(f"{os_key.upper()}_REDIRECT_URI"),
+            client_id=client.client_id,
             client_secret=client.client_secret,
         )
     except Exception as e:
