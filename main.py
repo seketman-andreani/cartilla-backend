@@ -143,7 +143,6 @@ async def login(request: Request, os_key: str):
         await client.load_server_metadata()
 
     uri, _ = await client.create_authorization_url(
-        url=client.server_metadata["authorization_endpoint"],
         redirect_uri=redirect_uri,
         state=state,
     )
