@@ -5,11 +5,13 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 from authlib.integrations.starlette_client import OAuth, OAuthError
 import jwt  # PyJWT
+import secrets
+
 from sqlalchemy import create_engine, Column, String, Integer, DateTime, select
 from sqlalchemy.orm import sessionmaker, declarative_base
-from starlette.middleware.sessions import SessionMiddleware
 
 from dotenv import load_dotenv
 import logging
@@ -56,12 +58,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-)
-
-# Clave secreta para firmar cookies de sesión
-app.add_middleware(
-    SessionMiddleware, 
-    secret_key=os.getenv("CARTILLAIA_SECRET", "session-secret-for-dev")
 )
 
 def register_oidc_clients():
@@ -143,82 +139,69 @@ def db_upsert_refresh(sub: str, os_key: str, refresh_token: str, expires_at: Opt
         db.close()
 
 # ---------- Routes ----------
+# storage temporal de states (en producción usar Redis o DB)
+STATE_STORE = {}
+
 @app.get("/login/{os_key}")
 async def login(request: Request, os_key: str):
-    logger.info(f"Inicio del método /login/{os_key}")
-    
-    if os_key not in OS_KEYS:
-        logger.error(f"OS key desconocido: {os_key}")
-        raise HTTPException(status_code=404, detail="unknown_os")
-    
-    client_name = f"azure_{os_key}"
-    client = oauth.create_client(client_name)
-    
+    client = oauth.create_client(f"azure_{os_key}")
     if client is None:
-        logger.error(f"No se pudo crear el cliente OAuth para {os_key}")
-        raise HTTPException(status_code=500, detail=f"oidc_client_not_configured_for_{os_key}")
-    logger.info(f"Cliente OAuth creado exitosamente para {os_key}")
-    
+        raise HTTPException(status_code=500, detail=f"OIDC client not configured for {os_key}")
+
     redirect_uri = os.getenv(f"{os_key.upper()}_REDIRECT_URI")
     if not redirect_uri:
         raise HTTPException(status_code=500, detail=f"{os_key.upper()}_REDIRECT_URI not set")
 
-    logger.info(f"[{os_key}] Using redirect_uri: {redirect_uri}")
-    return await client.authorize_redirect(request, redirect_uri)
+    # generar state aleatorio
+    state = secrets.token_urlsafe(32)
+    STATE_STORE[state] = {"os_key": os_key}
+
+    logger.info(f"[{os_key}] Iniciando login con state={state}, redirect_uri={redirect_uri}")
+
+    return await client.authorize_redirect(
+        request,
+        redirect_uri,
+        state=state
+    )
 
 @app.get("/auth/callback/{os_key}")
 async def auth_callback(request: Request, os_key: str):
-    logger.info(f"Inicio del método /auth/callback/{os_key}")
-    
-    if os_key not in OS_KEYS:
-        logger.error(f"OS key desconocido: {os_key}")
-        raise HTTPException(status_code=404, detail="unknown_os")
-    
-    client_name = f"azure_{os_key}"
-    client = oauth.create_client(client_name)
+    client = oauth.create_client(f"azure_{os_key}")
     if client is None:
-        logger.error(f"No se pudo crear el cliente OAuth para {os_key}")
-        raise HTTPException(status_code=500, detail=f"oidc_client_not_configured_for_{os_key}")
-    
+        raise HTTPException(status_code=500, detail=f"OIDC client not configured for {os_key}")
+
+    # obtener state de la query
+    state = request.query_params.get("state")
+    if not state or state not in STATE_STORE:
+        raise HTTPException(status_code=400, detail="invalid_or_missing_state")
+
     try:
         token = await client.authorize_access_token(request)
-        logger.info(f"Token recibido exitosamente para {os_key}: {token}")
     except OAuthError as err:
-        logger.error(f"Error de OAuth al autorizar el token para {os_key}: {err.error}")
+        logger.error(f"OAuth error for {os_key}: {err.error}")
         raise HTTPException(status_code=400, detail=f"oauth_error: {err.error}")
-    
-    # token is a dict with access_token, id_token, refresh_token (if offline_access), expires_in...
-    # parse id_token to get user info
+
+    # limpiamos el state
+    del STATE_STORE[state]
+
+    # procesar userinfo
     try:
         userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
-        logger.info(f"Información del usuario obtenida exitosamente: {userinfo}")
-    except Exception as e:
-        logger.warning(f"No se pudo obtener información del usuario: {str(e)}")
+    except Exception:
         userinfo = {}
-    
-    sub = userinfo.get("sub") or userinfo.get("oid") or userinfo.get("preferred_username")
+
+    sub = userinfo.get("sub") or userinfo.get("oid")
     email = userinfo.get("email") or userinfo.get("preferred_username")
     name = userinfo.get("name")
-    
+
     if not sub:
-        logger.error("No se pudo determinar el identificador único del usuario (sub)")
         raise HTTPException(status_code=400, detail="invalid_user_info")
-    
-    # Guardar refresh_token en DB (si viene)
-    refresh_token = token.get("refresh_token")
-    expires_at = None
-    if token.get("expires_in"):
-        expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(token["expires_in"]))
-    if refresh_token and sub:
-        logger.info(f"Guardando refresh_token para el usuario {sub} y OS {os_key}")
-        db_upsert_refresh(sub=sub, os_key=os_key, refresh_token=refresh_token, expires_at=expires_at)
-    else:
-        logger.warning(f"No se recibió refresh_token para el usuario {sub} y OS {os_key}")
-    
-    # Generar JWT CartillaIA y redirigir al frontend con token en query string (POC)
+
+    # generar tu JWT propio para CartillaIA
     cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key)
-    redirect_to = f"{os.getenv('FRONTEND_BASE', FRONTEND_BASE)}/dashboard?token={cart_jwt}"
-    logger.info(f"Redirigiendo al usuario {sub} al frontend con el JWT generado")
+    redirect_to = f"{os.getenv('FRONTEND_BASE')}/dashboard?token={cart_jwt}"
+
+    logger.info(f"[{os_key}] Usuario autenticado: {email}, redirigiendo al frontend.")
     return RedirectResponse(url=redirect_to)
 
 @app.get("/me")
