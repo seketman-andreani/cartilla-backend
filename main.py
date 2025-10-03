@@ -6,11 +6,13 @@ from typing import Optional
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from authlib.integrations.starlette_client import OAuth, OAuthError
+
+from authlib.integrations.starlette_client import OAuth
 import jwt  # PyJWT
 
 from sqlalchemy import create_engine, Column, String, Integer, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
+
 from dotenv import load_dotenv
 import logging
 
@@ -25,9 +27,10 @@ PORT = int(os.getenv("PORT", "10000"))
 FRONTEND_BASE = os.getenv("FRONTEND_BASE", "http://localhost:3000")
 CARTILLAIA_SECRET = os.getenv("CARTILLAIA_SECRET", "cartillaia-secret-for-dev")
 JWT_EXP_MINUTES = int(os.getenv("JWT_EXP_MINUTES", "15"))
+
 OS_KEYS = ["medife", "osde"]
 
-# ---------- DB ----------
+# ---------- DB (SQLite simple para POC) ----------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tokens.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -43,8 +46,7 @@ class RefreshTokenEntry(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ---------- OAuth Setup ----------
-oauth = OAuth()
+# ---------- FastAPI ----------
 app = FastAPI(title="CartillaIA Auth POC")
 
 app.add_middleware(
@@ -54,6 +56,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------- OAuth ----------
+oauth = OAuth()
 
 def register_oidc_clients():
     for key in OS_KEYS:
@@ -78,6 +83,8 @@ async def startup_event():
     register_oidc_clients()
 
 # ---------- Helpers ----------
+STATE_STORE = {}
+
 def create_cartillaia_jwt(sub: str, email: Optional[str], name: Optional[str], os_key: str):
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
@@ -90,11 +97,13 @@ def create_cartillaia_jwt(sub: str, email: Optional[str], name: Optional[str], o
         "exp": now + datetime.timedelta(minutes=JWT_EXP_MINUTES)
     }
     token = jwt.encode(payload, CARTILLAIA_SECRET, algorithm="HS256")
-    return token if isinstance(token, str) else token.decode()
+    if isinstance(token, bytes):
+        token = token.decode()
+    return token
 
-def decode_cartillaia_jwt(token: str):
+def decode_cartillaia_jwt(token: str, verify_exp: bool = True):
     try:
-        return jwt.decode(token, CARTILLAIA_SECRET, algorithms=["HS256"])
+        return jwt.decode(token, CARTILLAIA_SECRET, algorithms=["HS256"], options={"verify_exp": verify_exp})
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="cartillaia_token_expired")
     except jwt.InvalidTokenError:
@@ -121,9 +130,6 @@ def db_upsert_refresh(sub: str, os_key: str, refresh_token: str, expires_at: Opt
     finally:
         db.close()
 
-# ---------- Stateless State Store ----------
-STATE_STORE = {}
-
 # ---------- Routes ----------
 @app.get("/login/{os_key}")
 async def login(request: Request, os_key: str):
@@ -145,7 +151,6 @@ async def login(request: Request, os_key: str):
         redirect_uri=redirect_uri,
         state=state,
     )
-
     uri = auth_data["url"]
 
     logger.info(f"[{os_key}] Login iniciado con state={state}, redirect_uri={redirect_uri}")
@@ -180,10 +185,12 @@ async def auth_callback(request: Request, os_key: str):
         logger.error(f"Error obteniendo token para {os_key}: {str(e)}")
         raise HTTPException(status_code=400, detail=f"token_exchange_failed: {str(e)}")
 
-    try:
-        userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
-    except Exception:
-        userinfo = {}
+    id_token = token.get("id_token")
+    if not id_token:
+        raise HTTPException(status_code=400, detail="no_id_token_in_response")
+
+    # POC: decodificamos sin verificar firma
+    userinfo = jwt.decode(id_token, options={"verify_signature": False})
 
     sub = userinfo.get("sub") or userinfo.get("oid")
     email = userinfo.get("email") or userinfo.get("preferred_username")
@@ -191,6 +198,14 @@ async def auth_callback(request: Request, os_key: str):
 
     if not sub:
         raise HTTPException(status_code=400, detail="invalid_user_info")
+
+    # Guardar refresh_token
+    refresh_token = token.get("refresh_token")
+    expires_at = None
+    if token.get("expires_in"):
+        expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(token["expires_in"]))
+    if refresh_token:
+        db_upsert_refresh(sub, os_key, refresh_token, expires_at)
 
     cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key)
     redirect_to = f"{FRONTEND_BASE}/dashboard?token={cart_jwt}"
@@ -215,8 +230,8 @@ async def refresh(request: Request):
     token = auth.split(" ", 1)[1]
 
     try:
-        payload = jwt.decode(token, CARTILLAIA_SECRET, algorithms=["HS256"], options={"verify_exp": False})
-    except jwt.InvalidTokenError:
+        payload = decode_cartillaia_jwt(token, verify_exp=False)
+    except Exception:
         raise HTTPException(status_code=401, detail="invalid_cartillaia_token")
 
     sub = payload.get("sub")
@@ -224,7 +239,7 @@ async def refresh(request: Request):
     if not sub or not os_key:
         raise HTTPException(status_code=400, detail="invalid_token_payload")
 
-    entry = db_get_refresh(sub=sub, os_key=os_key)
+    entry = db_get_refresh(sub, os_key)
     if not entry or not entry.refresh_token:
         raise HTTPException(status_code=401, detail="no_refresh_token_stored")
 
@@ -232,28 +247,47 @@ async def refresh(request: Request):
     if client is None:
         raise HTTPException(status_code=500, detail=f"OIDC client not configured for {os_key}")
 
-    token_endpoint = client.server_metadata.get("token_endpoint")
+    oauth_client = client._get_oauth_client()
     try:
-        new_token = await client.refresh_token(token_endpoint, refresh_token=entry.refresh_token)
+        new_token = await oauth_client.fetch_token(
+            url=client.server_metadata["token_endpoint"],
+            grant_type="refresh_token",
+            refresh_token=entry.refresh_token,
+            client_id=client.client_id,
+            client_secret=client.client_secret,
+        )
     except Exception as e:
-        db_upsert_refresh(sub=sub, os_key=os_key, refresh_token="", expires_at=None)
+        db_upsert_refresh(sub, os_key, "", None)
         raise HTTPException(status_code=400, detail=f"refresh_failed: {str(e)}")
 
     new_refresh = new_token.get("refresh_token")
     if new_refresh:
-        db_upsert_refresh(sub=sub, os_key=os_key, refresh_token=new_refresh)
+        db_upsert_refresh(
+            sub,
+            os_key,
+            new_refresh,
+            expires_at=(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(new_token.get("expires_in", 3600))))
+        )
 
-    try:
-        userinfo = await client.parse_id_token(request, new_token)
-    except Exception:
-        userinfo = {}
+    id_token = new_token.get("id_token")
+    userinfo = jwt.decode(id_token, options={"verify_signature": False}) if id_token else {}
 
-    new_cart_jwt = create_cartillaia_jwt(sub=sub, email=userinfo.get("email"), name=userinfo.get("name"), os_key=os_key)
+    new_cart_jwt = create_cartillaia_jwt(
+        sub=sub,
+        email=userinfo.get("email"),
+        name=userinfo.get("name"),
+        os_key=os_key,
+    )
     return {"token": new_cart_jwt}
 
-@app.get("/")
-async def root():
-    return {"status": "ok"}
+@app.get("/me")
+async def me(request: Request):
+    auth = request.headers.get("Authorization")
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing_token")
+    token = auth.split(" ", 1)[1]
+    payload = decode_cartillaia_jwt(token)
+    return JSONResponse(content=payload)
 
 @app.get("/healthcheck")
 async def healthcheck():
@@ -264,6 +298,7 @@ async def healthcheck():
         db_status = "ok"
     except Exception as e:
         db_status = f"error: {str(e)}"
+
     return {
         "status": "ok",
         "db_status": db_status,
