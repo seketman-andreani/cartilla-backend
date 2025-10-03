@@ -158,16 +158,28 @@ async def auth_callback(request: Request, os_key: str):
         raise HTTPException(status_code=500, detail=f"OIDC client not configured for {os_key}")
 
     state = request.query_params.get("state")
+    code = request.query_params.get("code")
     if not state or state not in STATE_STORE:
         raise HTTPException(status_code=400, detail="invalid_or_missing_state")
+    if not code:
+        raise HTTPException(status_code=400, detail="missing_code")
+
+    # limpiar el state usado
+    del STATE_STORE[state]
 
     try:
-        token = await client.authorize_access_token(request, state=state)
-    except OAuthError as err:
-        logger.error(f"OAuth error for {os_key}: {err.error}")
-        raise HTTPException(status_code=400, detail=f"oauth_error: {err.error}")
-
-    del STATE_STORE[state]
+        # 👇 usamos el cliente subyacente, no el wrapper Starlette
+        oauth_client = client._get_oauth_client()
+        token = await oauth_client.fetch_token(
+            client.server_metadata["token_endpoint"],
+            grant_type="authorization_code",
+            code=code,
+            redirect_uri=os.getenv(f"{os_key.upper()}_REDIRECT_URI"),
+            client_secret=client.client_secret,
+        )
+    except Exception as e:
+        logger.error(f"Error obteniendo token para {os_key}: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"token_exchange_failed: {str(e)}")
 
     try:
         userinfo = token.get("userinfo") or await client.parse_id_token(request, token)
