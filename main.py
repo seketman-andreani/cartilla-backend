@@ -138,7 +138,10 @@ async def login(request: Request, os_key: str):
     state = secrets.token_urlsafe(32)
     STATE_STORE[state] = {"os_key": os_key}
 
-    # construir URL de autorización sin session
+    # Forzamos carga de la metadata si aún no existe
+    if not client.server_metadata:
+        await client.load_server_metadata()
+
     uri, _ = client.create_authorization_url(
         client.server_metadata["authorization_endpoint"],
         redirect_uri=redirect_uri,
