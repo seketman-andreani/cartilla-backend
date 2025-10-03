@@ -96,7 +96,7 @@ async def startup_event():
 
 # ---------- Helpers ----------
 def create_cartillaia_jwt(sub: str, email: Optional[str], name: Optional[str], os_key: str):
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": sub,
         "email": email,
@@ -304,7 +304,8 @@ async def healthcheck():
     try:
         # Verificar conexión a la base de datos
         with engine.connect() as connection:
-            connection.execute("SELECT 1")
+            from sqlalchemy.sql import text
+            connection.execute(text("SELECT 1"))
         db_status = "ok"
     except Exception as e:
         db_status = f"error: {str(e)}"
