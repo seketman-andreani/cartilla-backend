@@ -84,13 +84,22 @@ async def startup_event():
 # ---------- Helpers ----------
 STATE_STORE = {}
 
-def create_cartillaia_jwt(sub: str, email: Optional[str], name: Optional[str], os_key: str):
+def is_admin(userinfo: dict, os_key: str) -> bool:
+    groups = userinfo.get("groups", [])
+    admin_group_id = os.getenv(f"{os_key.upper()}_ADMIN_GROUP_ID")
+    os.getenv(f"{os_key.upper()}_REDIRECT_URI")
+    if isinstance(groups, list) and admin_group_id in groups:
+        return True
+    return False
+
+def create_cartillaia_jwt(sub: str, email: Optional[str], name: Optional[str], os_key: str, is_admin_flag: bool = False):
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": sub,
         "email": email,
         "name": name,
         "os_key": os_key,
+        "is_admin": is_admin_flag,
         "iss": "CartillaIA",
         "iat": now,
         "exp": now + datetime.timedelta(minutes=JWT_EXP_MINUTES)
@@ -208,7 +217,8 @@ async def auth_callback(request: Request, os_key: str):
     if refresh_token:
         db_upsert_refresh(sub, os_key, refresh_token, expires_at)
 
-    cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key)
+    admin_flag = is_admin(userinfo, os_key)
+    cart_jwt = create_cartillaia_jwt(sub=sub, email=email, name=name, os_key=os_key, is_admin_flag=admin_flag)
     redirect_to = f"{FRONTEND_BASE}/dashboard?token={cart_jwt}"
 
     logger.info(f"[{os_key}] Usuario autenticado: {email}, redirigiendo al frontend.")
@@ -264,11 +274,14 @@ async def refresh(request: Request):
     id_token = new_token.get("id_token")
     userinfo = jwt.decode(id_token, options={"verify_signature": False}) if id_token else {}
 
+    admin_flag = is_admin(userinfo, os_key)
+
     new_cart_jwt = create_cartillaia_jwt(
         sub=sub,
         email=userinfo.get("email"),
         name=userinfo.get("name"),
         os_key=os_key,
+        is_admin_flag=admin_flag
     )
     return {"token": new_cart_jwt}
 
