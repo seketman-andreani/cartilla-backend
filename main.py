@@ -27,7 +27,7 @@ FRONTEND_BASE = os.getenv("FRONTEND_BASE", "http://localhost:3000")
 CARTILLAIA_SECRET = os.getenv("CARTILLAIA_SECRET", "cartillaia-secret-for-dev")
 JWT_EXP_MINUTES = int(os.getenv("JWT_EXP_MINUTES", "15"))
 
-OS_KEYS = ["medife", "osde"]
+OS_KEYS = ["opendevpro", "medife", "osde", "swissmedical"]
 
 # ---------- DB (SQLite simple para POC) ----------
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tokens.db")
