@@ -264,11 +264,12 @@ async def refresh(request: Request):
 
     new_refresh = new_token.get("refresh_token")
     if new_refresh:
+        TOKEN_EXPIRATION_DEFAULT = 3600  # Default token expiration in seconds
         db_upsert_refresh(
             sub,
             os_key,
             new_refresh,
-            expires_at=(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(new_token.get("expires_in", 3600))))
+            expires_at=(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=int(new_token.get("expires_in", TOKEN_EXPIRATION_DEFAULT))))
         )
 
     id_token = new_token.get("id_token")
